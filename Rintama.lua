@@ -1,8 +1,8 @@
 --[[
     ========================================================================
     NYU HUB - Standalone Distribution Bundle
-    Generated: 2026-10-26T07:52:57.793Z
-    Modules: 24 registered
+    Generated: 2026-10-26T07:59:08.282Z
+    Modules: 25 registered
     Architecture: Custom NYU UI Foundation (No third-party UI library)
     ========================================================================
 --]]
@@ -1786,6 +1786,359 @@ __modules["Features/Diagnostics"] = function(require)
     return Diagnostics
 end
 
+-- [[[ MODULE: Features/Fly ]]]
+__modules["Features/Fly"] = function(require)
+
+--[[
+    NYU HUB - Fly
+    Camera-relative flight with WASD, Space, and Ctrl.
+]]
+
+local Fly = {
+    Enabled = false,
+    Speed = 50,
+}
+
+local Services = nil
+local Players = nil
+local UserInputService = nil
+local RunService = nil
+
+local CharacterAddedConnection = nil
+local InputBeganConnection = nil
+local InputEndedConnection = nil
+local RenderSteppedConnection = nil
+
+local BodyVelocity = nil
+local BodyGyro = nil
+local ActiveCharacter = nil
+local ActiveHumanoid = nil
+local ActiveRoot = nil
+local PreviousAutoRotate = nil
+
+local Keys = {
+    W = false,
+    A = false,
+    S = false,
+    D = false,
+    Up = false,
+    Down = false,
+}
+
+local function Disconnect(connection)
+    if connection then
+        connection:Disconnect()
+    end
+end
+
+local function ClearMovementObjects()
+    if BodyVelocity then
+        BodyVelocity:Destroy()
+        BodyVelocity = nil
+    end
+
+    if BodyGyro then
+        BodyGyro:Destroy()
+        BodyGyro = nil
+    end
+end
+
+local function ResetKeys()
+    for key in pairs(Keys) do
+        Keys[key] = false
+    end
+end
+
+local function GetCharacterParts()
+    local player = Services and Services.LocalPlayer
+    local character = player and player.Character
+
+    if not character then
+        return nil, nil, nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not root or humanoid.Health <= 0 then
+        return nil, nil, nil
+    end
+
+    return character, humanoid, root
+end
+
+local function StopFlight(restoreState)
+    Disconnect(RenderSteppedConnection)
+    RenderSteppedConnection = nil
+
+    ClearMovementObjects()
+
+    if ActiveHumanoid and ActiveHumanoid.Parent then
+        if PreviousAutoRotate ~= nil then
+            ActiveHumanoid.AutoRotate = PreviousAutoRotate
+        end
+
+        if restoreState and ActiveHumanoid.Health > 0 then
+            ActiveHumanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end
+    end
+
+    ActiveCharacter = nil
+    ActiveHumanoid = nil
+    ActiveRoot = nil
+    PreviousAutoRotate = nil
+
+    ResetKeys()
+end
+
+local function StartFlight()
+    if not Fly.Enabled then
+        return false
+    end
+
+    local character, humanoid, root = GetCharacterParts()
+
+    if not character then
+        warn("[NYU HUB] Fly: Karakter belum siap.")
+        return false
+    end
+
+    StopFlight(false)
+
+    ActiveCharacter = character
+    ActiveHumanoid = humanoid
+    ActiveRoot = root
+    PreviousAutoRotate = humanoid.AutoRotate
+
+    BodyVelocity = Instance.new("BodyVelocity")
+    BodyVelocity.Name = "NyuFlyVelocity"
+    BodyVelocity.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    BodyVelocity.P = 1e4
+    BodyVelocity.Velocity = Vector3.zero
+    BodyVelocity.Parent = root
+
+    BodyGyro = Instance.new("BodyGyro")
+    BodyGyro.Name = "NyuFlyGyro"
+    BodyGyro.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    BodyGyro.P = 1e4
+    BodyGyro.D = 500
+    BodyGyro.CFrame = root.CFrame
+    BodyGyro.Parent = root
+
+    humanoid.AutoRotate = false
+    humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+
+    RenderSteppedConnection = RunService.RenderStepped:Connect(function()
+        if not Fly.Enabled
+            or not ActiveRoot
+            or not ActiveRoot.Parent
+            or not ActiveHumanoid
+            or ActiveHumanoid.Health <= 0
+            or not BodyVelocity
+            or not BodyGyro
+        then
+            return
+        end
+
+        local camera = workspace.CurrentCamera
+        if not camera then
+            return
+        end
+
+        local direction = Vector3.zero
+        local look = camera.CFrame.LookVector
+        local right = camera.CFrame.RightVector
+
+        if Keys.W then
+            direction += look
+        end
+
+        if Keys.S then
+            direction -= look
+        end
+
+        if Keys.D then
+            direction += right
+        end
+
+        if Keys.A then
+            direction -= right
+        end
+
+        if Keys.Up then
+            direction += Vector3.yAxis
+        end
+
+        if Keys.Down then
+            direction -= Vector3.yAxis
+        end
+
+        if direction.Magnitude > 0 then
+            direction = direction.Unit
+        end
+
+        BodyVelocity.Velocity = direction * Fly.Speed
+
+        -- Keep the character facing the horizontal camera direction.
+        local horizontalLook = Vector3.new(look.X, 0, look.Z)
+
+        if horizontalLook.Magnitude > 0.001 then
+            BodyGyro.CFrame = CFrame.lookAt(
+                ActiveRoot.Position,
+                ActiveRoot.Position + horizontalLook.Unit
+            )
+        end
+    end)
+
+    return true
+end
+
+local function OnInputBegan(input, gameProcessed)
+    if gameProcessed or not Fly.Enabled then
+        return
+    end
+
+    if input.KeyCode == Enum.KeyCode.W then
+        Keys.W = true
+    elseif input.KeyCode == Enum.KeyCode.A then
+        Keys.A = true
+    elseif input.KeyCode == Enum.KeyCode.S then
+        Keys.S = true
+    elseif input.KeyCode == Enum.KeyCode.D then
+        Keys.D = true
+    elseif input.KeyCode == Enum.KeyCode.Space then
+        Keys.Up = true
+    elseif input.KeyCode == Enum.KeyCode.LeftControl
+        or input.KeyCode == Enum.KeyCode.RightControl
+    then
+        Keys.Down = true
+    end
+end
+
+local function OnInputEnded(input)
+    if input.KeyCode == Enum.KeyCode.W then
+        Keys.W = false
+    elseif input.KeyCode == Enum.KeyCode.A then
+        Keys.A = false
+    elseif input.KeyCode == Enum.KeyCode.S then
+        Keys.S = false
+    elseif input.KeyCode == Enum.KeyCode.D then
+        Keys.D = false
+    elseif input.KeyCode == Enum.KeyCode.Space then
+        Keys.Up = false
+    elseif input.KeyCode == Enum.KeyCode.LeftControl
+        or input.KeyCode == Enum.KeyCode.RightControl
+    then
+        Keys.Down = false
+    end
+end
+
+function Fly.init(services)
+    Services = services
+    Players = game:GetService("Players")
+    UserInputService = game:GetService("UserInputService")
+    RunService = game:GetService("RunService")
+
+    local localPlayer = Services and Services.LocalPlayer
+    if not localPlayer then
+        localPlayer = Players.LocalPlayer
+    end
+
+    if not localPlayer then
+        warn("[NYU HUB] Fly: LocalPlayer tidak ditemukan.")
+        return false
+    end
+
+    Disconnect(CharacterAddedConnection)
+    Disconnect(InputBeganConnection)
+    Disconnect(InputEndedConnection)
+
+    CharacterAddedConnection = nil
+    InputBeganConnection = nil
+    InputEndedConnection = nil
+
+    Fly.SetEnabled(false)
+
+    CharacterAddedConnection = localPlayer.CharacterAdded:Connect(function()
+        if Fly.Enabled then
+            StopFlight(false)
+            task.wait(0.5)
+
+            if Fly.Enabled then
+                StartFlight()
+            end
+        end
+    end)
+
+    InputBeganConnection = UserInputService.InputBegan:Connect(OnInputBegan)
+    InputEndedConnection = UserInputService.InputEnded:Connect(OnInputEnded)
+
+    print("[NYU HUB] Fly siap.")
+    return true
+end
+
+function Fly.SetEnabled(enabled)
+    enabled = enabled == true
+
+    if Fly.Enabled == enabled then
+        return
+    end
+
+    Fly.Enabled = enabled
+
+    if enabled then
+        if not RunService or not UserInputService then
+            Fly.Enabled = false
+            warn("[NYU HUB] Fly belum diinisialisasi.")
+            return
+        end
+
+        if not StartFlight() then
+            Fly.Enabled = false
+            return
+        end
+
+        print("[NYU HUB] Fly: ON | Speed: " .. tostring(Fly.Speed))
+    else
+        StopFlight(true)
+        print("[NYU HUB] Fly: OFF")
+    end
+end
+
+function Fly.SetSpeed(speed)
+    local value = tonumber(speed)
+
+    if not value then
+        return false
+    end
+
+    Fly.Speed = math.clamp(value, 1, 200)
+    return true
+end
+
+function Fly.GetSpeed()
+    return Fly.Speed
+end
+
+function Fly.IsEnabled()
+    return Fly.Enabled
+end
+
+function Fly.Destroy()
+    Fly.SetEnabled(false)
+
+    Disconnect(CharacterAddedConnection)
+    Disconnect(InputBeganConnection)
+    Disconnect(InputEndedConnection)
+
+    CharacterAddedConnection = nil
+    InputBeganConnection = nil
+    InputEndedConnection = nil
+end
+
+return Fly
+end
+
 -- [[[ MODULE: Features/InfiniteJump ]]]
 __modules["Features/InfiniteJump"] = function(require)
 
@@ -2060,6 +2413,7 @@ function Main.init(require)
     local TeleportPlayer = require("Features/TeleportPlayer")
     local Diagnostics = require("Features/Diagnostics")
     local InfiniteJump = require("Features/InfiniteJump")
+    local Fly = require("Features/Fly")
 
     local Dialogue = require("Features/AutoFarmTofu/Dialogue")
     local Interaction = require("Features/AutoFarmTofu/Interaction")
@@ -2089,6 +2443,7 @@ function Main.init(require)
     WalkSpeed.init(Services)
     TeleportPlayer.init(Services, Logger)
     InfiniteJump.init(Services)
+    Fly.init(Services)
 
     FarmCycle.init({
         Character = Character,
@@ -2124,6 +2479,7 @@ function Main.init(require)
         WalkSpeed = WalkSpeed,
         TeleportPlayer = TeleportPlayer,
         InfiniteJump = InfiniteJump,
+        Fly = Fly,
         Diagnostics = Diagnostics,
         FarmCycle = FarmCycle,
     }, Logger
@@ -3411,6 +3767,25 @@ function UtilitiesTab.Create(window, config, features, logger)
                 infiniteJump.SetEnabled(enabled)
             else
                 warn("[NYU HUB] InfiniteJump module is not available.")
+            end
+        end,
+    })
+
+    
+    -- Fly
+    local fly = features.Fly
+
+    tab:CreateToggle({
+        name = "Fly",
+        description = "Terbang menggunakan WASD, Space, dan Ctrl",
+        default = fly and fly.IsEnabled
+            and fly.IsEnabled() or false,
+        flag = "NyuFly",
+        callback = function(enabled)
+            if fly and fly.SetEnabled then
+                fly.SetEnabled(enabled)
+            else
+                warn("[NYU HUB] Fly module is not available.")
             end
         end,
     })
