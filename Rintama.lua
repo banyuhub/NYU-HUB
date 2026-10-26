@@ -1,7 +1,7 @@
 --[[
     ========================================================================
     NYU HUB - Standalone Distribution Bundle
-    Generated: 2026-10-26T06:42:01.962Z
+    Generated: 2026-10-26T07:41:12.349Z
     Modules: 23 registered
     Architecture: Custom NYU UI Foundation (No third-party UI library)
     ========================================================================
@@ -737,366 +737,626 @@ end
 
 -- [[[ MODULE: Features/AutoFarmTofu/FarmCycle ]]]
 __modules["Features/AutoFarmTofu/FarmCycle"] = function(require)
-    --[[
-        NYU HUB - Auto Farm Tofu State Machine & Lifecycle
-        Preserves exact 8-stage execution cycle, timing, retry parameters, and state transitions.
-    ]]
 
-    local Character = nil
-    local Teleport = nil
-    local Network = nil
-    local Logger = nil
-    local Dialogue = nil
-    local Interaction = nil
-    local QuestDetector = nil
-    local Config = nil
+--[[
+    NYU HUB - Auto Farm Tofu State Machine & Lifecycle
+    Keeps the existing modular architecture and verifies job state
+    before progressing through the delivery cycle.
+]]
 
-    local FarmCycle = {
-        AutoFarmEnabled = false,
-        CurrentFarmState = "IDLE",
-        FarmThread = nil,
-        LastDeliveredTarget = nil,
+local Character = nil
+local Teleport = nil
+local Network = nil
+local Logger = nil
+local Dialogue = nil
+local Interaction = nil
+local QuestDetector = nil
+local Config = nil
 
-        BUNTA_POSITION = Vector3.new(-144.784, -11.521, 665.749),
-        BUNTA_NAME = "Fujiwara Bunta",
-    }
+local FarmCycle = {
+    AutoFarmEnabled = false,
+    CurrentFarmState = "IDLE",
+    FarmThread = nil,
+    LastDeliveredTarget = nil,
 
-    function FarmCycle.init(dependencies)
-        Character = dependencies.Character
-        Teleport = dependencies.Teleport
-        Network = dependencies.Network
-        Logger = dependencies.Logger
-        Dialogue = dependencies.Dialogue
-        Interaction = dependencies.Interaction
-        QuestDetector = dependencies.QuestDetector
-        Config = dependencies.Config
+    BUNTA_POSITION = Vector3.new(-144.784, -11.521, 665.749),
+    BUNTA_NAME = "Fujiwara Bunta",
+}
+
+function FarmCycle.init(dependencies)
+    Character = dependencies.Character
+    Teleport = dependencies.Teleport
+    Network = dependencies.Network
+    Logger = dependencies.Logger
+    Dialogue = dependencies.Dialogue
+    Interaction = dependencies.Interaction
+    QuestDetector = dependencies.QuestDetector
+    Config = dependencies.Config
+end
+
+function FarmCycle.IsEnabled()
+    return FarmCycle.AutoFarmEnabled
+end
+
+function FarmCycle.ShouldCancel()
+    return not FarmCycle.AutoFarmEnabled
+end
+
+local function UpdateStatus(state, message, target)
+    FarmCycle.CurrentFarmState = state
+
+    if Logger then
+        Logger.UpdateStatus(state, message, target)
+    end
+end
+
+local function Notify(message)
+    if Logger then
+        Logger.Notify(Config and Config.Name or "NYU HUB", message)
+    end
+end
+
+local function GetActiveTarget()
+    if not QuestDetector then
+        return nil, nil
     end
 
-    function FarmCycle.IsEnabled()
-        return FarmCycle.AutoFarmEnabled
+    local target, source = QuestDetector.DetectActiveDeliveryTarget()
+
+    if typeof(target) ~= "string" or target:match("^%s*$") then
+        return nil, source
     end
 
-    function FarmCycle.ShouldCancel()
-        return not FarmCycle.AutoFarmEnabled
+    return target, source
+end
+
+local function GetNPCPart(model)
+    if not model then
+        return nil
     end
 
-    function FarmCycle.RunCycle()
-        local BUNTA_POSITION = FarmCycle.BUNTA_POSITION
-        local BUNTA_NAME = FarmCycle.BUNTA_NAME
+    return model:FindFirstChild("HumanoidRootPart")
+        or model.PrimaryPart
+        or model:FindFirstChildWhichIsA("BasePart")
+end
 
-        while FarmCycle.AutoFarmEnabled do
-            -- ----------------------------------------------------
-            -- TAHAP 1: TELEPORT MENUJU FUJIWARA BUNTA
-            -- ----------------------------------------------------
-            Logger.UpdateStatus("TELEPORT_TO_BUNTA", "Memulai teleport menuju Fujiwara Bunta...")
+local function WaitForActiveTarget(timeout)
+    local elapsed = 0
 
-            -- ----------------------------------------------------
-            -- TAHAP 2: VERIFY_ARRIVAL (Verifikasi Jarak & Kestabilan Posisi)
-            -- ----------------------------------------------------
-            Logger.UpdateStatus("VERIFY_ARRIVAL", "Memverifikasi kedatangan dan kestabilan posisi...")
-            local arrived, arriveReason = Teleport.TeleportAndVerifyArrival(BUNTA_POSITION, 6, 8, FarmCycle.ShouldCancel)
-            if not arrived then
-                warn("[NYU HUB] Kedatangan di lokasi Bunta belum stabil (" .. arriveReason .. "). Mengulang navigasi...")
-                task.wait(1.0)
-                continue
-            end
-            if not FarmCycle.AutoFarmEnabled then break end
+    while elapsed < timeout and not FarmCycle.ShouldCancel() do
+        local target, source = GetActiveTarget()
 
-            -- ----------------------------------------------------
-            -- TAHAP 3: PERIKSA JOB AKTIF (Jika sudah ada, lewati interaksi)
-            -- BUG2 FIX: Jika activeTarget sama dengan LastDeliveredTarget,
-            -- anggap itu data quest lama yang belum bersih - jangan skip interaksi Bunta
-            -- ----------------------------------------------------
-            local activeTarget = QuestDetector.DetectActiveDeliveryTarget()
-            if activeTarget and activeTarget ~= FarmCycle.LastDeliveredTarget then
-                print(string.format("[NYU HUB] Job delivery '%s' sudah aktif. Langsung menuju tahap pengiriman.", activeTarget))
-            else
-                if activeTarget and activeTarget == FarmCycle.LastDeliveredTarget then
-                    print(string.format("[NYU HUB] Target '%s' sama dengan delivery terakhir - kemungkinan data quest lama, paksa interaksi Bunta.", activeTarget))
-                end
-                -- ----------------------------------------------------
-                -- TAHAP 4: INTERACT_WITH_NPC & VERIFY_DIALOG_OPEN
-                -- ----------------------------------------------------
-                local buntaModel = Interaction.FindNPCModel(BUNTA_NAME)
-                if not buntaModel then
-                    warn("[NYU HUB] Model NPC Bunta belum dimuat di Workspace. Menunggu...")
-                    task.wait(1.5)
-                    continue
-                end
-
-                local dInfo = Dialogue.InspectBuntaDialogue()
-                local dialogOpened = dInfo.isOpen
-
-                if not dialogOpened then
-                    local interactAttempts = 0
-                    local maxInteract = 4
-
-                    while interactAttempts < maxInteract and FarmCycle.AutoFarmEnabled do
-                        interactAttempts = interactAttempts + 1
-                        Logger.UpdateStatus("INTERACT_WITH_NPC", string.format("Memicu interaksi NPC Bunta (percobaan #%d)...", interactAttempts))
-
-                        local ok, reason = Interaction.TriggerBuntaInteraction(buntaModel, FarmCycle.ShouldCancel)
-                        if not ok then
-                            warn("[NYU HUB] Gagal memicu interaksi: " .. reason)
-                        end
-
-                        -- VERIFY_DIALOG_OPEN: Menunggu dialog benar-benar muncul di layar
-                        Logger.UpdateStatus("VERIFY_DIALOG_OPEN", string.format("Menunggu dialog terbuka (percobaan #%d)...", interactAttempts))
-                        local waitElapsed = 0
-                        while waitElapsed < 2.5 and FarmCycle.AutoFarmEnabled do
-                            task.wait(0.3)
-                            waitElapsed = waitElapsed + 0.3
-                            dInfo = Dialogue.InspectBuntaDialogue()
-                            if dInfo.isOpen then
-                                dialogOpened = true
-                                print(string.format("[NYU HUB] DIALOG TERBUKA TERVERIFIKASI! (Container: '%s', Narasi: '%s')", dInfo.container.Name, dInfo.narration))
-                                break
-                            end
-                        end
-
-                        if dialogOpened then break end
-                        warn(string.format("[NYU HUB] Dialog belum terbuka pada percobaan #%d. Jeda sebelum retry...", interactAttempts))
-                        task.wait(0.8)
-                    end
-                else
-                    print(string.format("[NYU HUB] Dialog Bunta sudah dalam keadaan terbuka. (Container: '%s')", dInfo.container.Name))
-                end
-
-                if not FarmCycle.AutoFarmEnabled then break end
-
-                if not dialogOpened then
-                    warn("[NYU HUB] Gagal membuka dialog NPC Bunta setelah 4 percobaan. Mengulang dari navigasi...")
-                    task.wait(1.5)
-                    continue
-                end
-
-                -- ----------------------------------------------------
-                -- TAHAP 4.5: AUTO-SKIP DIALOG NARATIF AWAL (BUG1 FIX)
-                -- Skip semua narasi sebelum pilihan job muncul
-                -- ----------------------------------------------------
-                Logger.UpdateStatus("AUTO_SKIP_DIALOG", "Melewati dialog naratif awal...")
-                Dialogue.AutoSkipNarrativeDialog(FarmCycle.ShouldCancel, Interaction.ClickGuiButton)
-                task.wait(0.3)
-                if not FarmCycle.AutoFarmEnabled then break end
-
-                -- ----------------------------------------------------
-                -- TAHAP 5: SELECT_DIALOG_OPTION (Tahap 1 & Tahap 2)
-                -- ----------------------------------------------------
-                dInfo = Dialogue.InspectBuntaDialogue()
-
-                -- Tahap 1: Pilih "Do you have a job for me?" jika tersedia
-                if dInfo.optionJob and not dInfo.optionTakeIt and not dInfo.isJobAcceptedNarration then
-                    Logger.UpdateStatus("SELECT_OPTION_S1", "Memilih opsi: 'Do you have a job for me?'...")
-                    print(string.format("[NYU HUB DIALOG] Menekan tombol opsi Tahap 1: '%s'", dInfo.optionJob.text))
-                    Interaction.ClickGuiButton(dInfo.optionJob.instance)
-                    task.wait(0.8)
-
-                    -- BUG1 FIX: Auto-skip narasi setelah memilih job
-                    Logger.UpdateStatus("AUTO_SKIP_DIALOG", "Melewati dialog setelah memilih job...")
-                    Dialogue.AutoSkipNarrativeDialog(FarmCycle.ShouldCancel, Interaction.ClickGuiButton)
-                    task.wait(0.3)
-                end
-
-                if not FarmCycle.AutoFarmEnabled then break end
-
-                -- Tahap 2: Konfirmasi "Sure, I'll take it."
-                dInfo = Dialogue.InspectBuntaDialogue()
-                if not dInfo.isJobAcceptedNarration then
-                    Logger.UpdateStatus("CONFIRM_JOB_S2", "Menunggu konfirmasi: 'Sure, I\\'ll take it.'...")
-                    local s2Timeout = 6
-                    local s2Elapsed = 0
-                    local confirmed = false
-
-                    while s2Elapsed < s2Timeout and FarmCycle.AutoFarmEnabled do
-                        dInfo = Dialogue.InspectBuntaDialogue()
-                        if dInfo.isJobAcceptedNarration then
-                            confirmed = true
-                            break
-                        end
-
-                        if dInfo.optionTakeIt then
-                            print(string.format("[NYU HUB DIALOG] Menekan tombol opsi Tahap 2: '%s'", dInfo.optionTakeIt.text))
-                            Interaction.ClickGuiButton(dInfo.optionTakeIt.instance)
-                            confirmed = true
-                            task.wait(0.8)
-                            break
-                        elseif dInfo.advanceBtn then
-                            print(string.format("[NYU HUB DIALOG] Menekan tombol lanjutan/skip: '%s'", dInfo.advanceBtn.text))
-                            Interaction.ClickGuiButton(dInfo.advanceBtn.instance)
-                            task.wait(0.5)
-                        end
-
-                        task.wait(0.3)
-                        s2Elapsed = s2Elapsed + 0.3
-                    end
-
-                    if not FarmCycle.AutoFarmEnabled then break end
-
-                    if not confirmed then
-                        warn("[NYU HUB] Konfirmasi job gagal dipilih. Mengulang siklus...")
-                        task.wait(1.5)
-                        continue
-                    end
-                end
-
-                -- ----------------------------------------------------
-                -- TAHAP 6: VERIFY_JOB (Tutup dialog & pastikan target terdeteksi)
-                -- ----------------------------------------------------
-                -- BUG1 FIX: Auto-skip narasi setelah konfirmasi job (menutup dialog)
-                Logger.UpdateStatus("VERIFY_JOB", "Memverifikasi job aktif & melewati narasi sisa...")
-                Dialogue.AutoSkipNarrativeDialog(FarmCycle.ShouldCancel, Interaction.ClickGuiButton)
-                task.wait(0.3)
-            end
-
-            -- Polling verifikasi data quest aktif
-            local detectedTarget = nil
-            local detectSource = nil
-            local verifyTimeout = 10
-            local elapsed = 0
-
-            while elapsed < verifyTimeout and FarmCycle.AutoFarmEnabled do
-                detectedTarget, detectSource = QuestDetector.DetectActiveDeliveryTarget()
-                if detectedTarget then
-                    break
-                end
-                task.wait(0.5)
-                elapsed = elapsed + 0.5
-            end
-
-            if not FarmCycle.AutoFarmEnabled then break end
-
-            if not detectedTarget then
-                warn("[NYU HUB] Target job belum terverifikasi dari game data. Mengulang siklus...")
-                task.wait(2)
-                continue
-            end
-
-            print(string.format("[NYU HUB] VERIFIKASI JOB BERHASIL: Target = '%s' (via %s)", detectedTarget, detectSource))
-            Logger.UpdateStatus("JOB_ACCEPTED", string.format("Target: %s (via %s)", detectedTarget, detectSource), detectedTarget)
-            Logger.Notify(Config and Config.Name or "NYU HUB", "Job Aktif: Antar ke " .. detectedTarget)
-            task.wait(0.5)
-            if not FarmCycle.AutoFarmEnabled then break end
-
-            -- ----------------------------------------------------
-            -- TAHAP 7: TELEPORT_TO_RECIPIENT & DELIVER
-            -- ----------------------------------------------------
-            Logger.UpdateStatus("DELIVER_TO_RECIPIENT", "Navigasi menuju penerima: " .. detectedTarget, detectedTarget)
-            local targetModel = Interaction.FindNPCModel(detectedTarget)
-            if targetModel then
-                local targetPart = targetModel:FindFirstChild("HumanoidRootPart")
-                    or targetModel.PrimaryPart
-                    or targetModel:FindFirstChildWhichIsA("BasePart")
-                if targetPart then
-                    Teleport.TeleportAndVerifyArrival(targetPart.Position + Vector3.new(0, 0, 3), 6, 10, FarmCycle.ShouldCancel)
-                end
-            else
-                print(string.format("[NYU HUB] Model target '%s' belum ditemukan di Workspace. Mengirim sinyal network.", detectedTarget))
-            end
-
-            task.wait(0.6)
-            if not FarmCycle.AutoFarmEnabled then break end
-
-            if targetModel then
-                local prompt = targetModel:FindFirstChildWhichIsA("ProximityPrompt", true)
-                if prompt and fireproximityprompt then
-                    pcall(function() fireproximityprompt(prompt) end)
-                end
-            end
-            Network.TryCompleteDelivery(detectedTarget)
-
-            -- BUG2 FIX: Simpan target terakhir yang dideliver, bersihkan referensi lama
-            FarmCycle.LastDeliveredTarget = detectedTarget
-            targetModel = nil  -- Bersihkan referensi model NPC penerima
-
-            Logger.UpdateStatus("DELIVERY_COMPLETE", "Paket diserahkan ke " .. detectedTarget, detectedTarget)
-            task.wait(1.5)
-            if not FarmCycle.AutoFarmEnabled then break end
-
-            -- ----------------------------------------------------
-            -- TAHAP 8: RETURN_TO_START & COOLDOWN
-            -- ----------------------------------------------------
-            Logger.UpdateStatus("RETURN_TO_START", "Kembali ke Fujiwara Bunta untuk job berikutnya...")
-            local backArrived, backReason = Teleport.TeleportAndVerifyArrival(BUNTA_POSITION, 6, 8, FarmCycle.ShouldCancel)
-            if not backArrived then
-                warn("[NYU HUB] Kembali ke Bunta timeout (" .. backReason .. "). Melakukan re-pivot...")
-                Teleport.TeleportAndVerifyArrival(BUNTA_POSITION, 4, 10, FarmCycle.ShouldCancel)
-            end
-
-            -- BUG2 FIX: Verifikasi bahwa kita berada dekat Bunta sebelum melanjutkan
-            Logger.UpdateStatus("VERIFY_RETURN", "Memverifikasi posisi di dekat Fujiwara Bunta...")
-            local buntaReturnModel = Interaction.FindNPCModel(BUNTA_NAME)
-            if buntaReturnModel then
-                local buntaReturnPart = buntaReturnModel:FindFirstChild("HumanoidRootPart")
-                    or buntaReturnModel.PrimaryPart
-                    or buntaReturnModel:FindFirstChildWhichIsA("BasePart")
-                if buntaReturnPart then
-                    local returnRoot = Character.GetRootPart(FarmCycle.ShouldCancel)
-                    if returnRoot then
-                        local distToBunta = (returnRoot.Position - buntaReturnPart.Position).Magnitude
-                        if distToBunta > 15 then
-                            warn(string.format("[NYU HUB] Masih terlalu jauh dari Bunta (%.1f studs). Re-teleport...", distToBunta))
-                            Teleport.TeleportAndVerifyArrival(BUNTA_POSITION, 6, 8, FarmCycle.ShouldCancel)
-                        end
-                    end
-                end
-            end
-
-            -- Tunggu hingga data quest lama bersih sebelum siklus berikutnya
-            Logger.UpdateStatus("COOLDOWN", "Menunggu quest lama bersih & persiapan siklus baru...")
-            local clearTimer = 0
-            while clearTimer < 4 and FarmCycle.AutoFarmEnabled do
-                local current = QuestDetector.DetectActiveDeliveryTarget()
-                if not current or current ~= detectedTarget then
-                    break
-                end
-                task.wait(0.5)
-                clearTimer = clearTimer + 0.5
-            end
-
-            -- BUG2 FIX: Reset referensi agar siklus baru tidak menggunakan target lama
-            print(string.format("[NYU HUB] Siklus selesai. LastDeliveredTarget = '%s'. Memulai siklus baru.", tostring(FarmCycle.LastDeliveredTarget)))
-
-            if not FarmCycle.AutoFarmEnabled then break end
-            task.wait(1.0)
+        if target then
+            return target, source
         end
 
+        task.wait(0.5)
+        elapsed = elapsed + 0.5
+    end
+
+    return nil, nil
+end
+
+local function ProcessBuntaJob()
+    local buntaName = FarmCycle.BUNTA_NAME
+    local buntaPosition = FarmCycle.BUNTA_POSITION
+
+    UpdateStatus("TELEPORT_TO_BUNTA", "Menuju Fujiwara Bunta...")
+
+    local arrived, reason = Teleport.TeleportAndVerifyArrival(
+        buntaPosition, 6, 8, FarmCycle.ShouldCancel
+    )
+
+    if not arrived then
+        warn("[NYU HUB] Belum tiba di Bunta: " .. tostring(reason))
+        return nil, nil
+    end
+
+    if FarmCycle.ShouldCancel() then
+        return nil, nil
+    end
+
+    local buntaModel = Interaction.FindNPCModel(buntaName)
+
+    if not buntaModel then
+        warn("[NYU HUB] Model NPC Bunta belum ditemukan.")
+        return nil, nil
+    end
+
+    local dInfo = Dialogue.InspectBuntaDialogue()
+    local dialogOpened = dInfo.isOpen
+
+    if not dialogOpened then
+        for attempt = 1, 4 do
+            if FarmCycle.ShouldCancel() then
+                return nil, nil
+            end
+
+            UpdateStatus(
+                "INTERACT_WITH_NPC",
+                string.format("Membuka dialog Bunta (%d/4)...", attempt)
+            )
+
+            local ok, interactionReason =
+                Interaction.TriggerBuntaInteraction(
+                    buntaModel, FarmCycle.ShouldCancel
+                )
+
+            if not ok then
+                warn("[NYU HUB] Interaksi Bunta gagal: "
+                    .. tostring(interactionReason))
+            end
+
+            local elapsed = 0
+
+            while elapsed < 2.5 and not FarmCycle.ShouldCancel() do
+                task.wait(0.3)
+                elapsed = elapsed + 0.3
+
+                dInfo = Dialogue.InspectBuntaDialogue()
+
+                if dInfo.isOpen then
+                    dialogOpened = true
+                    break
+                end
+            end
+
+            if dialogOpened then
+                break
+            end
+
+            task.wait(0.8)
+        end
+    end
+
+    if FarmCycle.ShouldCancel() then
+        return nil, nil
+    end
+
+    if not dialogOpened then
+        warn("[NYU HUB] Dialog Bunta tidak berhasil dibuka.")
+        return nil, nil
+    end
+
+    UpdateStatus("AUTO_SKIP_DIALOG", "Melewati narasi awal...")
+    Dialogue.AutoSkipNarrativeDialog(
+        FarmCycle.ShouldCancel, Interaction.ClickGuiButton
+    )
+
+    task.wait(0.3)
+
+    if FarmCycle.ShouldCancel() then
+        return nil, nil
+    end
+
+    dInfo = Dialogue.InspectBuntaDialogue()
+
+    if dInfo.optionJob
+        and not dInfo.optionTakeIt
+        and not dInfo.isJobAcceptedNarration
+    then
+        UpdateStatus(
+            "SELECT_OPTION_S1",
+            "Memilih opsi permintaan job..."
+        )
+
+        Interaction.ClickGuiButton(dInfo.optionJob.instance)
+
+        local elapsed = 0
+
+        while elapsed < 2 and not FarmCycle.ShouldCancel() do
+            task.wait(0.2)
+            elapsed = elapsed + 0.2
+
+            dInfo = Dialogue.InspectBuntaDialogue()
+
+            if not dInfo.optionJob
+                or dInfo.optionTakeIt
+                or dInfo.isJobAcceptedNarration
+            then
+                break
+            end
+        end
+
+        if FarmCycle.ShouldCancel() then
+            return nil, nil
+        end
+
+        Dialogue.AutoSkipNarrativeDialog(
+            FarmCycle.ShouldCancel, Interaction.ClickGuiButton
+        )
+
+        task.wait(0.3)
+    end
+
+    if FarmCycle.ShouldCancel() then
+        return nil, nil
+    end
+
+    UpdateStatus("CONFIRM_JOB_S2", "Menunggu konfirmasi job...")
+
+    local elapsed = 0
+    local timeout = 10
+    local dialogStepComplete = false
+
+    while elapsed < timeout and not FarmCycle.ShouldCancel() do
+        dInfo = Dialogue.InspectBuntaDialogue()
+
+        if dInfo.isJobAcceptedNarration then
+            dialogStepComplete = true
+            break
+        end
+
+        if dInfo.optionTakeIt then
+            local clicked = Interaction.ClickGuiButton(
+                dInfo.optionTakeIt.instance
+            )
+
+            if clicked then
+                task.wait(0.8)
+
+                if FarmCycle.ShouldCancel() then
+                    return nil, nil
+                end
+
+                local afterClick = Dialogue.InspectBuntaDialogue()
+
+                if afterClick.isJobAcceptedNarration then
+                    dialogStepComplete = true
+                    break
+                elseif not afterClick.isOpen then
+                    -- Dialog closed is NOT proof of job acceptance.
+                    -- Continue to the independent target verification.
+                    dialogStepComplete = true
+                    break
+                end
+            end
+        else
+            local advance = dInfo.advanceBtn
+
+            if not advance and dInfo.container then
+                advance = Dialogue.FindDialogAdvanceTarget(
+                    dInfo.container
+                )
+            end
+
+            if advance then
+                Interaction.ClickGuiButton(advance.instance)
+            elseif dInfo.container
+                and dInfo.container:IsA("GuiButton")
+            then
+                Interaction.ClickGuiButton(dInfo.container)
+            end
+        end
+
+        task.wait(0.25)
+        elapsed = elapsed + 0.25
+    end
+
+    if FarmCycle.ShouldCancel() then
+        return nil, nil
+    end
+
+    if not dialogStepComplete then
+        warn("[NYU HUB] Tahap konfirmasi job belum selesai.")
+        return nil, nil
+    end
+
+    UpdateStatus("VERIFY_JOB", "Memverifikasi target job aktif...")
+
+    Dialogue.AutoSkipNarrativeDialog(
+        FarmCycle.ShouldCancel, Interaction.ClickGuiButton
+    )
+
+    local target, source = WaitForActiveTarget(10)
+
+    if FarmCycle.ShouldCancel() then
+        return nil, nil
+    end
+
+    if not target then
+        warn("[NYU HUB] Job belum terverifikasi. Tidak melanjutkan delivery.")
+        return nil, nil
+    end
+
+    print(string.format(
+        "[NYU HUB] Target job terdeteksi: '%s' (via %s)",
+        target, tostring(source)
+    ))
+
+    UpdateStatus(
+        "JOB_ACCEPTED",
+        string.format("Target: %s (via %s)", target, tostring(source)),
+        target
+    )
+
+    Notify("Job aktif: antar ke " .. target)
+
+    return target, source
+end
+
+local function ProcessDelivery(target)
+    if not target then
+        return false
+    end
+
+    if FarmCycle.ShouldCancel() then
+        return false
+    end
+
+    UpdateStatus(
+        "NAVIGATING_TO_RECIPIENT",
+        "Menuju penerima: " .. target,
+        target
+    )
+
+    local targetModel = Interaction.FindNPCModel(target)
+
+    if not targetModel then
+        warn("[NYU HUB] Model penerima tidak ditemukan: " .. target)
+        UpdateStatus(
+            "DELIVERY_UNCONFIRMED",
+            "Model penerima tidak ditemukan: " .. target,
+            target
+        )
+        return false
+    end
+
+    local targetPart = GetNPCPart(targetModel)
+
+    if not targetPart then
+        warn("[NYU HUB] Bagian tubuh/part penerima tidak ditemukan: " .. target)
+        UpdateStatus(
+            "DELIVERY_UNCONFIRMED",
+            "Part penerima tidak ditemukan: " .. target,
+            target
+        )
+        return false
+    end
+
+    local arrived, reason, distance =
+        Teleport.TeleportAndVerifyArrival(
+            targetPart.Position + Vector3.new(0, 0, 3),
+            6, 10, FarmCycle.ShouldCancel
+        )
+
+    if not arrived then
+        warn(string.format(
+            "[NYU HUB] Kedatangan ke '%s' gagal diverifikasi: %s",
+            target, tostring(reason)
+        ))
+
+        UpdateStatus(
+            "DELIVERY_UNCONFIRMED",
+            "Kedatangan penerima belum terverifikasi.",
+            target
+        )
+
+        return false
+    end
+
+    if FarmCycle.ShouldCancel() then
+        return false
+    end
+
+    UpdateStatus(
+        "REACHED_RECIPIENT",
+        string.format("Tiba di %s (jarak %.1f studs)", target, distance or 0),
+        target
+    )
+
+    local maxAttempts = 3
+
+    for attempt = 1, maxAttempts do
+        if FarmCycle.ShouldCancel() then
+            return false
+        end
+
+        UpdateStatus(
+            "INTERACTING_WITH_RECIPIENT",
+            string.format("Interaksi dengan %s (%d/%d)", target, attempt, maxAttempts),
+            target
+        )
+
+        Interaction.TriggerNPCInteraction(
+            targetModel, FarmCycle.ShouldCancel
+        )
+
+        -- A successful call only means the local network call did not throw.
+        -- It is not proof that the server accepted the delivery.
+        local networkCallSucceeded = Network.TryCompleteDelivery(target)
+
+        if not networkCallSucceeded then
+            print("[NYU HUB] Network completion tidak tersedia; menunggu bukti dari game.")
+        end
+
+        task.wait(0.6)
+
+        if FarmCycle.ShouldCancel() then
+            return false
+        end
+
+        Dialogue.AutoSkipNarrativeDialog(
+            FarmCycle.ShouldCancel, Interaction.ClickGuiButton
+        )
+
+        UpdateStatus(
+            "VERIFYING_DELIVERY",
+            "Memeriksa perubahan status target...",
+            target
+        )
+
+        local elapsed = 0
+        local missingCount = 0
+        local confirmedByTargetChange = false
+
+        while elapsed < 4 and not FarmCycle.ShouldCancel() do
+            local currentTarget = GetActiveTarget()
+
+            if currentTarget and currentTarget ~= target then
+                -- Evidence of target transition, but not authoritative
+                -- proof that the server granted the delivery reward.
+                confirmedByTargetChange = true
+                break
+            elseif currentTarget == nil then
+                missingCount = missingCount + 1
+
+                if missingCount >= 4 then
+                    break
+                end
+            else
+                missingCount = 0
+            end
+
+            task.wait(0.5)
+            elapsed = elapsed + 0.5
+        end
+
+        if FarmCycle.ShouldCancel() then
+            return false
+        end
+
+        if confirmedByTargetChange then
+            print(string.format(
+                "[NYU HUB] Target berubah setelah interaksi dengan '%s'.",
+                target
+            ))
+
+            -- We still cannot prove a reward was granted. Do not claim
+            -- definitive delivery success from target change alone.
+            UpdateStatus(
+                "DELIVERY_UNCONFIRMED",
+                "Target berubah, tetapi keberhasilan delivery belum terbukti.",
+                target
+            )
+
+            return false
+        end
+
+        if attempt < maxAttempts then
+            warn(string.format(
+                "[NYU HUB] Delivery '%s' belum terverifikasi (%d/%d).",
+                target, attempt, maxAttempts
+            ))
+
+            task.wait(1)
+        end
+    end
+
+    UpdateStatus(
+        "DELIVERY_UNCONFIRMED",
+        "Tidak ditemukan bukti kuat bahwa delivery berhasil.",
+        target
+    )
+
+    return false
+end
+
+function FarmCycle.RunCycle()
+    while FarmCycle.AutoFarmEnabled do
+        local target = GetActiveTarget()
+
+        if not target then
+            target = ProcessBuntaJob()
+        else
+            print("[NYU HUB] Job aktif terdeteksi: " .. target)
+        end
+
+        if FarmCycle.ShouldCancel() then
+            break
+        end
+
+        if not target then
+            task.wait(2)
+            continue
+        end
+
+        local delivered = ProcessDelivery(target)
+
+        if FarmCycle.ShouldCancel() then
+            break
+        end
+
+        if delivered then
+            FarmCycle.LastDeliveredTarget = target
+
+            UpdateStatus(
+                "DELIVERY_COMPLETE",
+                "Delivery terverifikasi: " .. target,
+                target
+            )
+
+            Notify("Delivery selesai: " .. target)
+        else
+            -- Avoid returning to Bunta or claiming success when the
+            -- delivery status remains uncertain.
+            task.wait(2)
+            continue
+        end
+
+        UpdateStatus("RETURN_TO_START", "Kembali ke Fujiwara Bunta...")
+
+        local returned, returnReason =
+            Teleport.TeleportAndVerifyArrival(
+                FarmCycle.BUNTA_POSITION,
+                6, 8, FarmCycle.ShouldCancel
+            )
+
+        if not returned then
+            warn("[NYU HUB] Kembali ke Bunta belum terverifikasi: "
+                .. tostring(returnReason))
+        end
+
+        if FarmCycle.ShouldCancel() then
+            break
+        end
+
+        UpdateStatus("COOLDOWN", "Menyiapkan siklus berikutnya...")
+        task.wait(1)
+    end
+
+    FarmCycle.CurrentFarmState = "IDLE"
+
+    if Logger then
         Logger.UpdateStatus("IDLE", "Auto Farm dihentikan.", "-")
     end
 
-    function FarmCycle.SetAutoFarmEnabled(enabled)
-        FarmCycle.AutoFarmEnabled = enabled
+    FarmCycle.FarmThread = nil
+end
 
-        if enabled then
-            Logger.Notify(Config and Config.Name or "NYU HUB", "Auto Farm Tofu diaktifkan...")
-            print("[NYU HUB] Auto Farm Tofu: ON")
+function FarmCycle.SetAutoFarmEnabled(enabled)
+    enabled = enabled == true
 
-            if FarmCycle.FarmThread then
-                task.cancel(FarmCycle.FarmThread)
-                FarmCycle.FarmThread = nil
-            end
-
-            FarmCycle.FarmThread = task.spawn(FarmCycle.RunCycle)
-        else
-            FarmCycle.AutoFarmEnabled = false
-            if FarmCycle.FarmThread then
-                task.cancel(FarmCycle.FarmThread)
-                FarmCycle.FarmThread = nil
-            end
-            Logger.UpdateStatus("IDLE", "Auto Farm dimatikan oleh pengguna.", "-")
-
-            Logger.Notify(Config and Config.Name or "NYU HUB", "Auto Farm Tofu dimatikan.")
-            print("[NYU HUB] Auto Farm Tofu: OFF")
-        end
+    if enabled == FarmCycle.AutoFarmEnabled then
+        return
     end
 
-    return FarmCycle
+    FarmCycle.AutoFarmEnabled = enabled
+
+    if enabled then
+        Notify("Auto Farm Tofu diaktifkan...")
+        print("[NYU HUB] Auto Farm Tofu: ON")
+
+        FarmCycle.FarmThread = task.spawn(FarmCycle.RunCycle)
+    else
+        FarmCycle.AutoFarmEnabled = false
+
+        Notify("Auto Farm Tofu dimatikan.")
+        print("[NYU HUB] Auto Farm Tofu: OFF")
+
+        -- Do not task.cancel the current worker. Its cancellation checks
+        -- let the loop exit through the normal cleanup path.
+    end
+end
+
+return FarmCycle
 end
 
 -- [[[ MODULE: Features/AutoFarmTofu/Interaction ]]]
 __modules["Features/AutoFarmTofu/Interaction"] = function(require)
     --[[
         NYU HUB - Auto Farm Tofu Interaction Logic
-        Handles NPC model resolution, multi-method GUI clicking, and Bunta interaction triggers.
+        Handles NPC model resolution, multi-method GUI clicking, and universal NPC interaction triggers.
     ]]
 
     local Services = nil
@@ -1179,35 +1439,35 @@ __modules["Features/AutoFarmTofu/Interaction"] = function(require)
         return clicked
     end
 
-    function Interaction.TriggerBuntaInteraction(buntaModel, shouldCancelCheck)
-        if not buntaModel then return false, "NoModel" end
+    function Interaction.TriggerNPCInteraction(npcModel, shouldCancelCheck)
+        if not npcModel then return false, "NoModel" end
 
         local char, root, hum = Character.WaitForCharacterReady(2, shouldCancelCheck)
         if not root then return false, "NoRoot" end
 
-        local buntaPart = buntaModel:FindFirstChild("HumanoidRootPart")
-            or buntaModel.PrimaryPart
-            or buntaModel:FindFirstChild("Head")
-            or buntaModel:FindFirstChildWhichIsA("BasePart")
+        local npcPart = npcModel:FindFirstChild("HumanoidRootPart")
+            or npcModel.PrimaryPart
+            or npcModel:FindFirstChild("Head")
+            or npcModel:FindFirstChildWhichIsA("BasePart")
 
-        if not buntaPart then return false, "NoBuntaPart" end
+        if not npcPart then return false, "NoNPCPart" end
 
-        -- Pastikan karakter benar-benar dekat (< 20 studs) sebelum interaksi dijalankan
-        local dist = (root.Position - buntaPart.Position).Magnitude
-        if dist > 20 then
-            warn(string.format("[NYU HUB INTERACT] Jarak karakter ke Bunta terlalu jauh (%.1f studs, toleransi 20 studs). Interaksi ditolak.", dist))
+        -- Pastikan karakter benar-benar dekat (< 25 studs) sebelum interaksi dijalankan
+        local dist = (root.Position - npcPart.Position).Magnitude
+        if dist > 25 then
+            warn(string.format("[NYU HUB INTERACT] Jarak karakter ke '%s' terlalu jauh (%.1f studs, toleransi 25 studs). Interaksi ditolak.", npcModel.Name, dist))
             return false, "TooFar"
         end
 
-        print(string.format("[NYU HUB INTERACT] Menjalankan mekanisme interaksi ke '%s' (Jarak aktual: %.2f studs)...", buntaModel.Name, dist))
+        print(string.format("[NYU HUB INTERACT] Menjalankan mekanisme interaksi ke '%s' (Jarak aktual: %.2f studs)...", npcModel.Name, dist))
 
         local triggeredPrompt = false
         local triggeredClick = false
         local triggeredMouseSim = false
         local triggeredKey = false
 
-        -- 1. ProximityPrompt di dalam model Bunta
-        local prompt = buntaModel:FindFirstChildWhichIsA("ProximityPrompt", true)
+        -- 1. ProximityPrompt di dalam model NPC (override bypass distance & duration)
+        local prompt = npcModel:FindFirstChildWhichIsA("ProximityPrompt", true)
         if prompt and fireproximityprompt then
             pcall(function()
                 local origHold = prompt.HoldDuration
@@ -1224,8 +1484,8 @@ __modules["Features/AutoFarmTofu/Interaction"] = function(require)
             end)
         end
 
-        -- 2. ClickDetector di dalam model Bunta
-        for _, desc in ipairs(buntaModel:GetDescendants()) do
+        -- 2. ClickDetector di dalam model NPC
+        for _, desc in ipairs(npcModel:GetDescendants()) do
             if desc:IsA("ClickDetector") and fireclickdetector then
                 pcall(function()
                     local origDist = desc.MaxActivationDistance
@@ -1237,13 +1497,13 @@ __modules["Features/AutoFarmTofu/Interaction"] = function(require)
             end
         end
 
-        -- 3. Hadapkan kamera langsung ke Bunta dan lakukan simulasi klik mouse
+        -- 3. Hadapkan kamera langsung ke NPC dan lakukan simulasi klik mouse
         pcall(function()
             local workspace = Services and Services.Workspace or game:GetService("Workspace")
             local camera = workspace.CurrentCamera
-            if camera and buntaPart then
-                camera.CFrame = CFrame.new(camera.CFrame.Position, buntaPart.Position)
-                local screenPos, onScreen = camera:WorldToViewportPoint(buntaPart.Position)
+            if camera and npcPart then
+                camera.CFrame = CFrame.new(camera.CFrame.Position, npcPart.Position)
+                local screenPos, onScreen = camera:WorldToViewportPoint(npcPart.Position)
                 if onScreen then
                     local vim = Services and Services.VirtualInputManager or game:GetService("VirtualInputManager")
                     vim:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
@@ -1265,9 +1525,13 @@ __modules["Features/AutoFarmTofu/Interaction"] = function(require)
             triggeredKey = true
         end)
 
-        print(string.format("[NYU HUB INTERACT] Sinyal interaksi dikirim (Prompt: %s, ClickDetector: %s, MouseSim: %s, KeyE: %s).",
-            tostring(triggeredPrompt), tostring(triggeredClick), tostring(triggeredMouseSim), tostring(triggeredKey)))
+        print(string.format("[NYU HUB INTERACT] Sinyal interaksi dikirim ke '%s' (Prompt: %s, Click: %s, MouseSim: %s, KeyE: %s).",
+            npcModel.Name, tostring(triggeredPrompt), tostring(triggeredClick), tostring(triggeredMouseSim), tostring(triggeredKey)))
         return true, "Success"
+    end
+
+    function Interaction.TriggerBuntaInteraction(buntaModel, shouldCancelCheck)
+        return Interaction.TriggerNPCInteraction(buntaModel, shouldCancelCheck)
     end
 
     return Interaction
@@ -1275,74 +1539,120 @@ end
 
 -- [[[ MODULE: Features/AutoFarmTofu/QuestDetector ]]]
 __modules["Features/AutoFarmTofu/QuestDetector"] = function(require)
-    --[[
-        NYU HUB - Auto Farm Tofu Quest Detector
-        Detects active delivery destination through attributes, player values, GUI labels, and workspace markers.
-    ]]
 
-    local Services = nil
+--[[
+    NYU HUB - Auto Farm Tofu Quest Detector
+    Detects delivery targets only from explicit player attributes
+    or clearly labeled delivery instructions in visible GUI text.
+    
+    Note:
+    Generic StringValues and Workspace markers are intentionally
+    excluded because they do not prove an active delivery quest.
+]]
 
-    local QuestDetector = {
-        BUNTA_NAME = "Fujiwara Bunta",
-    }
+local Services = nil
 
-    function QuestDetector.init(services)
-        Services = services
+local QuestDetector = {
+    BUNTA_NAME = "Fujiwara Bunta",
+}
+
+function QuestDetector.init(services)
+    Services = services
+end
+
+local function CleanTargetName(value, buntaName)
+    if typeof(value) ~= "string" then
+        return nil
     end
 
-    function QuestDetector.DetectActiveDeliveryTarget(localPlayer, buntaName)
-        buntaName = buntaName or QuestDetector.BUNTA_NAME
-        localPlayer = localPlayer or (Services and Services.LocalPlayer) or game:GetService("Players").LocalPlayer
-        if not localPlayer then return nil, nil end
+    local cleaned = value:match("^%s*(.-)%s*$")
 
-        -- 1. Deteksi melalui attribute LocalPlayer
-        local checkAttrs = {
-            "DeliveryTarget",
-            "DeliveryNPC",
-            "QuestTarget",
-            "TargetNPC",
-            "DeliveryDestination",
-            "ActiveDelivery",
-            "Target",
-        }
-        for _, attrName in ipairs(checkAttrs) do
-            local val = localPlayer:GetAttribute(attrName)
-            if val and typeof(val) == "string" and #val > 0 then
-                return val, "PlayerAttribute:" .. attrName
-            end
+    if not cleaned or #cleaned < 2 then
+        return nil
+    end
+
+    if cleaned:lower() == buntaName:lower() then
+        return nil
+    end
+
+    -- Reject text that is clearly not a destination name.
+    local lower = cleaned:lower()
+    local invalid = {
+        "deliver to",
+        "delivery",
+        "quest",
+        "target",
+        "complete",
+        "accept",
+        "cancel",
+        "tofu",
+    }
+
+    for _, word in ipairs(invalid) do
+        if lower == word then
+            return nil
         end
+    end
 
-        -- 2. Deteksi melalui Value object di folder player (Quests, Job, dsb)
-        local checkFolders = {
-            "Quests", "Quest", "Job", "CurrentJob", "Delivery", "PlayerData"
-        }
-        for _, folderName in ipairs(checkFolders) do
-            local folder = localPlayer:FindFirstChild(folderName)
-            if folder then
-                for _, child in ipairs(folder:GetChildren()) do
-                    if child:IsA("StringValue") and #child.Value > 0 then
-                        return child.Value, "PlayerValue:" .. folderName .. "." .. child.Name
-                    end
-                end
-            end
+    return cleaned
+end
+
+function QuestDetector.DetectActiveDeliveryTarget(localPlayer, buntaName)
+    buntaName = buntaName or QuestDetector.BUNTA_NAME
+
+    localPlayer = localPlayer
+        or (Services and Services.LocalPlayer)
+        or game:GetService("Players").LocalPlayer
+
+    if not localPlayer then
+        return nil, nil
+    end
+
+    -- 1. Explicit delivery-related player attributes only.
+    local checkAttrs = {
+        "DeliveryTarget",
+        "DeliveryNPC",
+        "DeliveryDestination",
+    }
+
+    for _, attrName in ipairs(checkAttrs) do
+        local value = localPlayer:GetAttribute(attrName)
+        local target = CleanTargetName(value, buntaName)
+
+        if target then
+            return target, "PlayerAttribute:" .. attrName
         end
+    end
 
-        -- 3. Deteksi melalui PlayerGui text label yang aktif
-        local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
-        if playerGui then
-            for _, gui in ipairs(playerGui:GetChildren()) do
-                if gui:IsA("ScreenGui") and gui.Enabled then
-                    for _, desc in ipairs(gui:GetDescendants()) do
-                        if desc:IsA("TextLabel") and desc.Visible then
-                            local text = desc.Text
-                            local target = text:match("[Dd]eliver to%s+([%w%s]+)")
-                                or text:match("[Aa]ntar ke%s+([%w%s]+)")
-                                or text:match("[Tt]arget:%s*([%w%s]+)")
-                                or text:match("[Tt]o:%s*([%w%s]+)")
-                            if target then
-                                local cleaned = target:match("^%s*(.-)%s*$")
-                                if #cleaned > 1 and cleaned ~= buntaName then
-                                    return cleaned, "PlayerGui:" .. desc.Name
+    -- 2. Look for explicitly labeled delivery instructions in visible GUI.
+    local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+
+    if playerGui then
+        for _, gui in ipairs(playerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Enabled then
+                for _, desc in ipairs(gui:GetDescendants()) do
+                    if desc:IsA("TextLabel") and desc.Visible then
+                        local text = desc.Text or ""
+
+                        -- Match a complete line where possible.
+                        local patterns = {
+                            "[Dd]eliver to:%s*(.+)",
+                            "[Dd]eliver to%s+(.+)",
+                            "[Aa]ntar ke:%s*(.+)",
+                            "[Aa]ntar ke%s+(.+)",
+                        }
+
+                        for _, pattern in ipairs(patterns) do
+                            local captured = text:match(pattern)
+
+                            if captured then
+                                -- Avoid accidentally capturing additional
+                                -- instructions after punctuation.
+                                captured = captured:match("^([^%.!\n\r]+)")
+                                local target = CleanTargetName(captured, buntaName)
+
+                                if target then
+                                    return target, "PlayerGui:" .. desc.Name
                                 end
                             end
                         end
@@ -1350,26 +1660,14 @@ __modules["Features/AutoFarmTofu/QuestDetector"] = function(require)
                 end
             end
         end
-
-        -- 4. Deteksi melalui marker Workspace aktif (BillboardGui/Highlight selain pada Bunta)
-        local workspace = Services and Services.Workspace or game:GetService("Workspace")
-        local npcFolder = workspace:FindFirstChild("NPCs")
-        if npcFolder then
-            for _, npc in ipairs(npcFolder:GetChildren()) do
-                if npc.Name ~= buntaName then
-                    local marker = npc:FindFirstChildWhichIsA("BillboardGui", true)
-                        or npc:FindFirstChildWhichIsA("Highlight", true)
-                    if marker and marker.Enabled then
-                        return npc.Name, "WorkspaceMarker:" .. npc.Name
-                    end
-                end
-            end
-        end
-
-        return nil, nil
     end
 
-    return QuestDetector
+    -- No reliable delivery target was found.
+    -- Do not guess from generic values or NPC markers.
+    return nil, nil
+end
+
+return QuestDetector
 end
 
 -- [[[ MODULE: Features/Diagnostics ]]]
