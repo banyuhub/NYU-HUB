@@ -1,8 +1,8 @@
 --[[
     ========================================================================
     NYU HUB - Standalone Distribution Bundle
-    Generated: 2026-10-26T07:41:12.349Z
-    Modules: 23 registered
+    Generated: 2026-10-26T07:52:57.793Z
+    Modules: 24 registered
     Architecture: Custom NYU UI Foundation (No third-party UI library)
     ========================================================================
 --]]
@@ -1786,6 +1786,124 @@ __modules["Features/Diagnostics"] = function(require)
     return Diagnostics
 end
 
+-- [[[ MODULE: Features/InfiniteJump ]]]
+__modules["Features/InfiniteJump"] = function(require)
+
+--[[
+    NYU HUB - Infinite Jump
+    Allows the local character to jump while airborne.
+]]
+
+local InfiniteJump = {
+    Enabled = false,
+}
+
+local Services = nil
+local UserInputService = nil
+local CharacterAddedConnection = nil
+local JumpRequestConnection = nil
+
+local function GetHumanoid()
+    local localPlayer = Services and Services.LocalPlayer
+    local character = localPlayer and localPlayer.Character
+
+    return character and character:FindFirstChildOfClass("Humanoid")
+end
+
+function InfiniteJump.init(services)
+    Services = services
+    UserInputService = game:GetService("UserInputService")
+
+    if CharacterAddedConnection then
+        CharacterAddedConnection:Disconnect()
+        CharacterAddedConnection = nil
+    end
+
+    if JumpRequestConnection then
+        JumpRequestConnection:Disconnect()
+        JumpRequestConnection = nil
+    end
+
+    local localPlayer = Services and Services.LocalPlayer
+    if not localPlayer then
+        warn("[NYU HUB] Infinite Jump: LocalPlayer tidak ditemukan.")
+        return false
+    end
+
+    CharacterAddedConnection = localPlayer.CharacterAdded:Connect(function()
+        -- Humanoid dicari kembali setiap kali karakter respawn.
+        task.wait(0.1)
+        GetHumanoid()
+    end)
+
+    print("[NYU HUB] Infinite Jump siap.")
+    return true
+end
+
+function InfiniteJump.SetEnabled(enabled)
+    enabled = enabled == true
+
+    if InfiniteJump.Enabled == enabled then
+        return
+    end
+
+    InfiniteJump.Enabled = enabled
+
+    if enabled then
+        if not UserInputService then
+            InfiniteJump.Enabled = false
+            warn("[NYU HUB] Infinite Jump belum diinisialisasi.")
+            return
+        end
+
+        JumpRequestConnection = UserInputService.JumpRequest:Connect(function()
+            if not InfiniteJump.Enabled then
+                return
+            end
+
+            local humanoid = GetHumanoid()
+
+            if not humanoid or humanoid.Health <= 0 then
+                return
+            end
+
+            -- Jangan mengganggu karakter yang sedang duduk atau mati.
+            if humanoid.Sit then
+                return
+            end
+
+            if humanoid.FloorMaterial == Enum.Material.Air then
+                humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+            end
+        end)
+
+        print("[NYU HUB] Infinite Jump: ON")
+    else
+        if JumpRequestConnection then
+            JumpRequestConnection:Disconnect()
+            JumpRequestConnection = nil
+        end
+
+        print("[NYU HUB] Infinite Jump: OFF")
+    end
+end
+
+function InfiniteJump.IsEnabled()
+    return InfiniteJump.Enabled
+end
+
+function InfiniteJump.Destroy()
+    InfiniteJump.SetEnabled(false)
+
+    if CharacterAddedConnection then
+        CharacterAddedConnection:Disconnect()
+        CharacterAddedConnection = nil
+    end
+end
+
+return InfiniteJump
+end
+
 -- [[[ MODULE: Features/TeleportPlayer ]]]
 __modules["Features/TeleportPlayer"] = function(require)
     --[[
@@ -1941,6 +2059,7 @@ function Main.init(require)
     local WalkSpeed = require("Features/WalkSpeed")
     local TeleportPlayer = require("Features/TeleportPlayer")
     local Diagnostics = require("Features/Diagnostics")
+    local InfiniteJump = require("Features/InfiniteJump")
 
     local Dialogue = require("Features/AutoFarmTofu/Dialogue")
     local Interaction = require("Features/AutoFarmTofu/Interaction")
@@ -1951,6 +2070,7 @@ function Main.init(require)
     local HomeTab = require("UI/Tabs/HomeTab")
     local UtilitiesTab = require("UI/Tabs/UtilitiesTab")
     local SettingsTab = require("UI/Tabs/SettingsTab")
+    
 
     -- Check LocalPlayer
     if not Services.LocalPlayer then
@@ -1968,6 +2088,7 @@ function Main.init(require)
     -- Wire Features
     WalkSpeed.init(Services)
     TeleportPlayer.init(Services, Logger)
+    InfiniteJump.init(Services)
 
     FarmCycle.init({
         Character = Character,
@@ -2002,9 +2123,12 @@ function Main.init(require)
     local utilitiesTab, statusComponent = UtilitiesTab.Create(window, Config, {
         WalkSpeed = WalkSpeed,
         TeleportPlayer = TeleportPlayer,
+        InfiniteJump = InfiniteJump,
         Diagnostics = Diagnostics,
         FarmCycle = FarmCycle,
-    }, Logger)
+    }, Logger
+)
+
     local settingsTab = SettingsTab.Create(window, Config)
 
     if statusComponent then
@@ -3270,6 +3394,25 @@ function UtilitiesTab.Create(window, config, features, logger)
     -- 3. Player Movement & Navigation
     tab:CreateSection({
         name = "Player Utilities",
+    })
+    
+    -- Infinite Jump
+    local infiniteJump = features.InfiniteJump
+
+    tab:CreateToggle({
+        name = "Infinite Jump",
+        description = "Memungkinkan karakter melompat saat berada di udara",
+        default = infiniteJump and infiniteJump.IsEnabled
+            and infiniteJump.IsEnabled() or false,
+        flag = "NyuInfiniteJump",
+
+        callback = function(enabled)
+            if infiniteJump and infiniteJump.SetEnabled then
+                infiniteJump.SetEnabled(enabled)
+            else
+                warn("[NYU HUB] InfiniteJump module is not available.")
+            end
+        end,
     })
 
     local wsConfig = config.WalkSpeed or {
